@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rivals · Dashboard</title>
+<style>
+:root{--ink:#12324a;--mut:#5d7f99;--line:rgba(30,120,190,.16);--card:rgba(255,255,255,.78);--acc:#2f8fe0;--bad:#d4493f;--bd:#cfe3f3}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink);min-height:100vh;
+  background:
+    repeating-linear-gradient(45deg,transparent 0 24px,var(--line) 24px 25px),
+    repeating-linear-gradient(-45deg,transparent 0 24px,var(--line) 24px 25px),
+    linear-gradient(160deg,#eaf7ff,#b9e0fb);background-attachment:fixed}
+header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:14px 18px;flex-wrap:wrap}
+h1{font-size:17px;font-weight:600;margin:0;letter-spacing:.04em}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+nav button{background:none;border:0;padding:7px 12px;border-radius:8px;color:var(--mut);font:inherit;cursor:pointer}
+nav button.on{background:var(--card);color:var(--ink);box-shadow:0 0 0 1px var(--bd)}
+main{max-width:980px;margin:0 auto;padding:0 14px 40px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:14px;backdrop-filter:blur(6px)}
+h2{font-size:14px;margin:0 0 10px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.06em}
+input,select,textarea{font:inherit;color:inherit;background:#fff;border:1px solid var(--bd);border-radius:8px;padding:7px 9px;width:100%}
+textarea{min-height:90px;resize:vertical}
+label{display:block;font-size:12px;color:var(--mut);margin:8px 0 3px}
+button.b{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 14px;font:inherit;cursor:pointer}
+button.g{background:#fff;color:var(--ink);border:1px solid var(--bd);border-radius:8px;padding:6px 11px;font:inherit;cursor:pointer}
+button.d{color:var(--bad)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.grow{flex:1;min-width:140px}
+.item{display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--bd)}
+.item:first-child{border-top:0}
+.item img{width:40px;height:40px;object-fit:contain;image-rendering:pixelated}
+.sub{color:var(--mut);font-size:13px}
+.tag{font-size:11px;padding:2px 8px;border-radius:99px;background:#fff;border:1px solid var(--bd)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
+dialog{border:1px solid var(--bd);border-radius:14px;padding:18px;width:min(560px,94vw);background:#f4fbff;color:var(--ink)}
+dialog::backdrop{background:rgba(18,50,74,.35)}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;padding:9px 16px;border-radius:10px;opacity:0;transition:.2s;pointer-events:none;max-width:90vw}
+#toast.show{opacity:1}
+#login{max-width:320px;margin:18vh auto}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<div id="login" class="card hide">
+  <h2>Rivals · Acceso</h2>
+  <input id="pw" type="password" placeholder="Clave del dashboard" autocomplete="current-password">
+  <div style="margin-top:10px"><button class="b" id="loginBtn">Entrar</button></div>
+</div>
+
+<div id="app" class="hide">
+  <header>
+    <h1>RIVALS · DASHBOARD</h1>
+    <nav id="tabs">
+      <button data-t="pokemon" class="on">Pokémon</button>
+      <button data-t="catalog">Movs y habilidades</button>
+      <button data-t="spawn">Spawn</button>
+      <button data-t="settings">Ajustes</button>
+    </nav>
+  </header>
+  <main>
+    <section id="t-pokemon">
+      <div class="card">
+        <div class="row">
+          <input id="q" class="grow" placeholder="Buscar Pokémon…">
+          <button class="b" id="newPk">Nuevo</button>
+          <button class="g" id="batchBtn">Importar lote</button>
+        </div>
+      </div>
+      <div class="card" id="pkList"></div>
+    </section>
+
+    <section id="t-catalog" class="hide">
+      <div class="card"><h2>Movimientos</h2><div id="catForm-moves"></div><div id="cat-moves"></div></div>
+      <div class="card"><h2>Habilidades</h2><div id="catForm-abilities"></div><div id="cat-abilities"></div></div>
+    </section>
+
+    <section id="t-spawn" class="hide">
+      <div class="card">
+        <h2>ForceSpawn</h2>
+        <div class="row">
+          <select id="fsPk" class="grow"></select>
+          <select id="fsCh" class="grow"></select>
+          <button class="b" id="fsGo">Invocar</button>
+        </div>
+      </div>
+      <div class="card"><h2>Categorías</h2><div id="catList"></div></div>
+      <div class="card hide" id="tableCard">
+        <h2 id="tableTitle">Tabla de spawn</h2>
+        <div class="row">
+          <select id="enPk" class="grow"></select>
+          <select id="enCh" class="grow"></select>
+          <input id="enW" type="number" min="1" value="1" style="width:80px" title="Peso">
+          <button class="b" id="enAdd">Añadir</button>
+        </div>
+        <div id="entries" style="margin-top:8px"></div>
+      </div>
+    </section>
+
+    <section id="t-settings" class="hide">
+      <div class="card">
+        <h2>Ajustes globales</h2>
+        <div class="row">
+          <div class="grow"><label>Viaje: horas caminando</label><input id="sHours" type="number" step="0.5" min="0.5"></div>
+          <div class="grow"><label>Viaje: precio del Ferri</label><input id="sCost" type="number" min="0"></div>
+        </div>
+        <div class="row">
+          <div class="grow"><label>EXP por enseñar un movimiento</label><input id="sMove" type="number" min="0"></div>
+          <div class="grow"><label>Intercambio: coste por entrenador</label><input id="sTrade" type="number" min="0"></div>
+        </div>
+        <div class="row">
+          <div class="grow"><label>Probabilidad shiny global (1 en N · 4096 = oficial · 0 = sin shinys)</label><input id="sShiny" type="number" min="0"><div class="sub" id="sShinyPct"></div></div>
+          <button class="b" id="sSave" style="align-self:flex-end">Guardar</button>
+        </div>
+      </div>
+      <div class="card"><h2>Zonas viajables y override (vacío = valor global)</h2><div id="zones"></div></div>
+    </section>
+  </main>
+</div>
+
+<dialog id="pkDlg">
+  <h2 id="pkDlgTitle">Pokémon</h2>
+  <label>Nombre</label><input id="f-name">
+  <label>Rareza</label>
+  <select id="f-rarity"><option value="comun">Común</option><option value="raro">Raro</option><option value="epico">Épico</option><option value="legendario">Legendario</option></select>
+  <label>Sprite (URL)</label><input id="f-sprite">
+  <label>Sprite shiny canon (URL)</label><input id="f-shiny">
+  <label>Peso del shiny canon (1 = normal · 0 = excluirlo y usar solo variantes propias)</label><input id="f-canonw" type="number" min="0">
+  <label>Probabilidad shiny de esta especie (1 en N · vacío = ajuste global · 0 = nunca)</label><input id="f-odds" type="number" min="0">
+  <label>Variantes shiny propias (peso = frecuencia relativa entre todas las shiny)</label>
+  <div id="varBox"></div>
+  <label>Tipos (separados por coma)</label><input id="f-types">
+  <label>Stats base</label>
+  <div class="grid">
+    <input id="s-hp" type="number" placeholder="HP"><input id="s-atk" type="number" placeholder="Atk"><input id="s-def" type="number" placeholder="Def">
+    <input id="s-spa" type="number" placeholder="SpA"><input id="s-spd" type="number" placeholder="SpD"><input id="s-spe" type="number" placeholder="Spe">
+  </div>
+  <label>Habilidades (coma)</label><input id="f-abilities">
+  <label>Movimientos (coma)</label><textarea id="f-moves"></textarea>
+  <label>Descripción Pokédex</label><textarea id="f-dex"></textarea>
+  <div class="row" style="margin-top:12px;justify-content:flex-end">
+    <button class="g" id="pkCancel">Cancelar</button><button class="b" id="pkSave">Guardar</button>
+  </div>
+</dialog>
+
+<dialog id="batchDlg">
+  <h2>Importar lote (JSON)</h2>
+  <p class="sub">Lista de Pokémon. Solo <b>name</b> y <b>rarity</b> son obligatorios; los campos ausentes conservan lo que ya había. Los movimientos y habilidades nuevos se crean solos en el catálogo para completarlos después. Opcionales para shinys: <b>shiny_odds</b> (1 en N), <b>shiny_canon_weight</b> y <b>shiny_variants</b> (lista de {name, sprite, weight}).</p>
+  <textarea id="batchTxt" style="min-height:220px;font-family:ui-monospace,monospace;font-size:12px" placeholder='[
+  {"name":"Pikachu","rarity":"raro","sprite":"https://…","types":["Eléctrico"],
+   "stats":{"hp":35,"atk":55,"def":40,"spa":50,"spd":50,"spe":90},
+   "abilities":["Elec. Estática"],"moves":["Impactrueno","Rayo"]}
+]'></textarea>
+  <div id="batchOut" class="sub"></div>
+  <div class="row" style="margin-top:12px;justify-content:flex-end">
+    <button class="g" id="batchClose">Cerrar</button><button class="b" id="batchGo">Importar</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const RAR = { comun: 'Común', raro: 'Raro', epico: 'Épico', legendario: 'Legendario' };
+let pokemon = [], structure = [], openCat = null;
+
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 2600); }
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && url !== '/api/login') { showLogin(); throw new Error('Sesión expirada'); }
+  if (!r.ok) { toast(data.error || 'Error'); throw new Error(data.error || r.status); }
+  return data;
+}
+const act = (fn) => async (...a) => { try { await fn(...a); } catch (e) { /* ya mostrado */ } };
+
+/* ---- login / tabs ---- */
+function showLogin() { $('app').classList.add('hide'); $('login').classList.remove('hide'); }
+$('loginBtn').onclick = act(async () => { await api('POST', '/api/login', { password: $('pw').value }); $('pw').value = ''; boot(); });
+$('pw').onkeydown = (e) => { if (e.key === 'Enter') $('loginBtn').click(); };
+$('tabs').onclick = (e) => {
+  const t = e.target.dataset.t; if (!t) return;
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b === e.target));
+  document.querySelectorAll('main > section').forEach((s) => s.classList.toggle('hide', s.id !== 't-' + t));
+  if (t === 'spawn') loadSpawn(); if (t === 'catalog') loadCatalog(); if (t === 'settings') loadSettings();
+};
+async function boot() {
+  try { await api('GET', '/api/me'); } catch { return showLogin(); }
+  $('login').classList.add('hide'); $('app').classList.remove('hide');
+  await loadPokemon();
+}
+
+/* ---- pokémon ---- */
+async function loadPokemon() { pokemon = await api('GET', '/api/pokemon'); renderPk(); }
+function renderPk() {
+  const q = $('q').value.toLowerCase();
+  const rows = pokemon.filter((p) => p.name.toLowerCase().includes(q));
+  $('pkList').innerHTML = rows.length ? rows.map((p) => `
+    <div class="item">
+      ${p.sprite ? `<img src="${esc(p.sprite)}" alt="">` : '<div style="width:40px"></div>'}
+      <div class="grow"><b>${esc(p.name)}</b> <span class="tag">${RAR[p.rarity]}</span>${p.variants.length ? ` <span class="tag">✨ ${p.variants.length} var.</span>` : ''}
+        <div class="sub">${esc(p.types.join(' / ') || 'sin tipos')} · ${p.moves.length} movs · ${p.abilities.length} hab.</div></div>
+      <button class="g" data-edit="${p.id}">Editar</button>
+      <button class="g d" data-del="${p.id}">✕</button>
+    </div>`).join('') : '<span class="sub">Aún no hay Pokémon. Crea uno o importa un lote.</span>';
+}
+$('q').oninput = renderPk;
+$('pkList').onclick = act(async (e) => {
+  if (e.target.dataset.edit) openPk(pokemon.find((p) => p.id == e.target.dataset.edit));
+  if (e.target.dataset.del) {
+    const p = pokemon.find((x) => x.id == e.target.dataset.del);
+    if (confirm(`¿Borrar ${p.name}? También saldrá de las tablas de spawn.`)) { await api('DELETE', '/api/pokemon/' + p.id); toast('Borrado'); loadPokemon(); }
+  }
+});
+const S = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'];
+let curPk = null;
+function renderVars(p) {
+  if (!p?.id) { $('varBox').innerHTML = '<span class="sub">Guarda el Pokémon primero para poder añadir variantes.</span>'; return; }
+  const canonW = p.shiny_sprite ? Number(p.shiny_canon_weight ?? 1) : 0;
+  const total = canonW + p.variants.reduce((a, v) => a + v.weight, 0);
+  const pct = (w) => (total ? Math.round((w / total) * 100) + '%' : '—');
+  const img = (u) => (u ? `<img src="${esc(u)}" alt="">` : '<div style="width:40px"></div>');
+  $('varBox').innerHTML = (canonW > 0 ? `<div class="item">${img(p.shiny_sprite)}<div class="grow"><b>Canon</b> <span class="tag">${pct(canonW)}</span></div></div>` : '')
+    + p.variants.map((v) => `<div class="item">${img(v.sprite)}<div class="grow"><b>${esc(v.name)}</b> <span class="tag">peso ${v.weight} · ${pct(v.weight)}</span></div>
+        <button class="g d" data-vdel="${v.id}">✕</button></div>`).join('')
+    + `<div class="row" style="margin-top:8px"><input id="vn" class="grow" placeholder="Nombre de la variante"><input id="vs" class="grow" placeholder="Sprite (URL)">
+        <input id="vw" type="number" min="1" value="1" style="width:70px" title="Peso"><button class="g" id="vAdd">Añadir</button></div>`;
+}
+$('varBox').onclick = act(async (e) => {
+  if (e.target.id === 'vAdd') {
+    await api('POST', `/api/pokemon/${curPk}/variants`, { name: $('vn').value, sprite: $('vs').value, weight: $('vw').value });
+    toast('Variante guardada');
+  } else if (e.target.dataset.vdel) {
+    if (!confirm('¿Borrar esta variante? Los Pokémon que ya la tienen pasarán a mostrar el shiny canon.')) return;
+    await api('DELETE', '/api/variants/' + e.target.dataset.vdel);
+  } else return;
+  await loadPokemon(); renderVars(pokemon.find((x) => x.id === curPk));
+});
+function openPk(p) {
+  curPk = p?.id ?? null;
+  p = p || { stats: {}, types: [], abilities: [], moves: [], variants: [] };
+  $('pkDlgTitle').textContent = p.id ? 'Editar Pokémon' : 'Nuevo Pokémon';
+  $('f-name').value = p.name || ''; $('f-name').disabled = !!p.id;
+  $('f-rarity').value = p.rarity || 'comun'; $('f-sprite').value = p.sprite || ''; $('f-shiny').value = p.shiny_sprite || '';
+  $('f-types').value = p.types.join(', '); $('f-abilities').value = p.abilities.join(', ');
+  $('f-moves').value = p.moves.join(', '); $('f-dex').value = p.dex_text || '';
+  $('f-canonw').value = p.shiny_canon_weight ?? 1; $('f-odds').value = p.shiny_odds ?? ''; renderVars(p);
+  S.forEach((k) => { $('s-' + k).value = p.stats[k] ?? ''; });
+  $('pkDlg').showModal();
+}
+$('newPk').onclick = () => openPk();
+$('pkCancel').onclick = () => $('pkDlg').close();
+$('pkSave').onclick = act(async () => {
+  const stats = {}; S.forEach((k) => { if ($('s-' + k).value !== '') stats[k] = Number($('s-' + k).value); });
+  await api('POST', '/api/pokemon', {
+    name: $('f-name').value, rarity: $('f-rarity').value, sprite: $('f-sprite').value, shiny_sprite: $('f-shiny').value,
+    types: $('f-types').value, stats, abilities: $('f-abilities').value, moves: $('f-moves').value, dex_text: $('f-dex').value,
+    shiny_odds: $('f-odds').value, shiny_canon_weight: $('f-canonw').value,
+  });
+  $('pkDlg').close(); toast('Guardado'); loadPokemon();
+});
+$('batchBtn').onclick = () => { $('batchOut').textContent = ''; $('batchDlg').showModal(); };
+$('batchClose').onclick = () => $('batchDlg').close();
+$('batchGo').onclick = act(async () => {
+  let data; try { data = JSON.parse($('batchTxt').value); } catch { return toast('JSON inválido'); }
+  const r = await api('POST', '/api/pokemon/batch', data);
+  $('batchOut').innerHTML = `✅ ${r.saved} guardados` + (r.errors.length ? `<br>⚠️ ${r.errors.map(esc).join('<br>')}` : '');
+  loadPokemon();
+});
+
+/* ---- catálogo ---- */
+function catForm(kind) {
+  $('catForm-' + kind).innerHTML = `<div class="row" style="margin-bottom:8px">
+    <input class="grow" id="cn-${kind}" placeholder="Nombre"><input id="ct-${kind}" placeholder="Tipo" style="width:120px">
+    <input class="grow" id="cd-${kind}" placeholder="Descripción"><button class="b" data-add="${kind}">Guardar</button></div>`;
+}
+async function loadCatalog() {
+  for (const kind of ['moves', 'abilities']) {
+    if (!$('cn-' + kind)) catForm(kind);
+    const rows = await api('GET', '/api/catalog/' + kind);
+    $('cat-' + kind).innerHTML = rows.map((r) => `
+      <div class="item"><div class="grow"><b>${esc(r.name)}</b> ${r.type ? `<span class="tag">${esc(r.type)}</span>` : ''}
+        <div class="sub">${esc(r.description) || '<i>sin descripción</i>'}</div></div>
+        <button class="g" data-fill="${kind}" data-n="${esc(r.name)}" data-t="${esc(r.type)}" data-d="${esc(r.description)}">Editar</button>
+        <button class="g d" data-rm="${kind}" data-n="${esc(r.name)}">✕</button></div>`).join('') || '<span class="sub">Vacío</span>';
+  }
+}
+$('t-catalog').onclick = act(async (e) => {
+  const d = e.target.dataset;
+  if (d.add) {
+    await api('POST', '/api/catalog/' + d.add, { name: $('cn-' + d.add).value, type: $('ct-' + d.add).value, description: $('cd-' + d.add).value });
+    ['cn', 'ct', 'cd'].forEach((p) => { $(`${p}-${d.add}`).value = ''; }); toast('Guardado'); loadCatalog();
+  }
+  if (d.fill) { $('cn-' + d.fill).value = d.n; $('ct-' + d.fill).value = d.t; $('cd-' + d.fill).value = d.d; $('cn-' + d.fill).focus(); }
+  if (d.rm && confirm(`¿Borrar ${d.n}?`)) { await api('DELETE', `/api/catalog/${d.rm}/${encodeURIComponent(d.n)}`); loadCatalog(); }
+});
+
+/* ---- spawn ---- */
+const pkOptions = () => pokemon.map((p) => `<option value="${p.id}">${esc(p.name)} (${RAR[p.rarity]})</option>`).join('');
+async function loadSpawn() {
+  [pokemon, structure] = await Promise.all([api('GET', '/api/pokemon'), api('GET', '/api/structure')]);
+  const states = Object.fromEntries((await api('GET', '/api/spawn/categories')).map((s) => [s.category_id, s]));
+  $('fsPk').innerHTML = pkOptions(); $('enPk').innerHTML = pkOptions();
+  $('fsCh').innerHTML = structure.map((c) => `<optgroup label="${esc(c.name)}">${c.channels.map((h) => `<option value="${h.id}">#${esc(h.name)}</option>`).join('')}</optgroup>`).join('');
+  $('catList').innerHTML = structure.map((c) => {
+    const s = states[c.id];
+    const st = !s ? 'sin spawn' : !s.enabled ? 'desactivada' : s.active ? '🟢 Pokémon activo' : s.next_spawn_at ? `⏳ próximo ${new Date(s.next_spawn_at).toLocaleTimeString()}` : '…';
+    return `<div class="item"><div class="grow"><b>${esc(c.name)}</b><div class="sub">${c.channels.length} canales · ${st}</div></div>
+      <button class="g" data-tbl="${c.id}">Tabla</button>
+      <button class="g" data-tog="${c.id}" data-on="${s?.enabled ? 0 : 1}">${s?.enabled ? 'Desactivar' : 'Activar'}</button></div>`;
+  }).join('') || '<span class="sub">El bot aún no ve categorías del servidor.</span>';
+  if (openCat) loadEntries();
+}
+$('fsGo').onclick = act(async () => { await api('POST', '/api/forcespawn', { pokemon_id: $('fsPk').value, channel_id: $('fsCh').value }); toast('Pokémon invocado'); });
+$('catList').onclick = act(async (e) => {
+  const d = e.target.dataset;
+  if (d.tog) { await api('POST', '/api/spawn/categories/' + d.tog, { enabled: d.on === '1' }); loadSpawn(); }
+  if (d.tbl) { openCat = d.tbl; loadEntries(); }
+});
+async function loadEntries() {
+  const cat = structure.find((c) => c.id === openCat); if (!cat) return;
+  $('tableCard').classList.remove('hide'); $('tableTitle').textContent = 'Tabla · ' + cat.name;
+  $('enCh').innerHTML = '<option value="">General (toda la categoría)</option>' + cat.channels.map((h) => `<option value="${h.id}">Exclusivo #${esc(h.name)}</option>`).join('');
+  const rows = await api('GET', `/api/spawn/${openCat}/entries`);
+  const nm = Object.fromEntries(cat.channels.map((h) => [h.id, h.name]));
+  $('entries').innerHTML = rows.map((r) => `<div class="item"><div class="grow"><b>${esc(r.name)}</b> <span class="tag">${RAR[r.rarity]}</span>
+    <div class="sub">${r.channel_id ? 'exclusivo #' + esc(nm[r.channel_id] || r.channel_id) : 'general'} · peso ${r.weight}</div></div>
+    <button class="g d" data-rm="${r.id}">✕</button></div>`).join('') || '<span class="sub">Tabla vacía</span>';
+}
+$('enAdd').onclick = act(async () => { await api('POST', `/api/spawn/${openCat}/entries`, { pokemon_id: $('enPk').value, channel_id: $('enCh').value, weight: $('enW').value }); loadEntries(); });
+$('entries').onclick = act(async (e) => { if (e.target.dataset.rm) { await api('DELETE', '/api/spawn/entries/' + e.target.dataset.rm); loadEntries(); } });
+
+/* ---- viaje ---- */
+function showShinyPct() {
+  const n = Number($('sShiny').value);
+  $('sShinyPct').textContent = n > 0 ? `≈ ${(100 / n).toFixed(n >= 100 ? 3 : 2)}% por captura` : 'Shinys desactivados';
+}
+$('sShiny').oninput = showShinyPct;
+async function loadSettings() {
+  const [s, st] = await Promise.all([api('GET', '/api/settings'), api('GET', '/api/structure')]);
+  $('sHours').value = s.travel_hours; $('sCost').value = s.travel_cost; $('sMove').value = s.move_cost; $('sTrade').value = s.trade_cost; $('sShiny').value = s.shiny_odds; showShinyPct();
+  const z = Object.fromEntries(s.zones.map((r) => [r.category_id, r]));
+  $('zones').innerHTML = st.map((c) => `<div class="item"><label class="row" style="margin:0;gap:6px;flex:1"><input type="checkbox" id="zz-${c.id}" style="width:auto"${z[c.id]?.is_zone ? ' checked' : ''}><b>${esc(c.name)}</b></label>
+    <input id="zh-${c.id}" type="number" step="0.5" placeholder="horas" style="width:90px" value="${z[c.id]?.hours ?? ''}">
+    <input id="zc-${c.id}" type="number" placeholder="precio" style="width:100px" value="${z[c.id]?.cost ?? ''}">
+    <button class="g" data-z="${c.id}">Guardar</button></div>`).join('');
+}
+$('sSave').onclick = act(async () => { await api('POST', '/api/settings', { travel_hours: $('sHours').value, travel_cost: $('sCost').value, move_cost: $('sMove').value, trade_cost: $('sTrade').value, shiny_odds: $('sShiny').value }); toast('Guardado'); });
+$('zones').onclick = act(async (e) => { const id = e.target.dataset.z; if (id) { await api('POST', '/api/settings/zone/' + id, { hours: $('zh-' + id).value, cost: $('zc-' + id).value, is_zone: $('zz-' + id).checked }); toast('Guardado'); } });
+
+boot();
+</script>
+</body>
+</html>
