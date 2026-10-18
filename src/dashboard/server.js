@@ -1,0 +1,340 @@
+import express from 'express';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { all, get, run, batch } from '../db.js';
+import { RARITIES } from '../config.js';
+import {
+  scheduleNext, activeSpawnIn, spawnPayload, registerSpawn,
+} from '../spawnCore.js';
+import { structure, textChannel, sendEmbed } from './discord.js';
+
+const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
+const STAT_KEYS = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'];
+
+const list = (v) => (Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : [])
+  .map((s) => String(s).trim()).filter(Boolean);
+const text = (v) => (v == null || String(v).trim() === '' ? null : String(v).trim());
+const num = (v) => (v == null || String(v).trim() === '' ? null : Math.round(Number(v)));
+const safeJson = (s, fallback) => { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } };
+
+function serializePokemon(r, variants) {
+  return {
+    id: r.id, name: r.name, rarity: r.rarity, sprite: r.sprite_url, shiny_sprite: r.shiny_sprite_url,
+    types: safeJson(r.types, []), stats: safeJson(r.stats, {}), abilities: safeJson(r.abilities, []),
+    moves: safeJson(r.moves, []), dex_text: r.dex_text,
+    shiny_odds: r.shiny_odds, shiny_canon_weight: r.shiny_canon_weight,
+    variants: variants.filter((v) => v.pokemon_id === r.id).map(({ id, name, sprite, weight }) => ({ id, name, sprite, weight })),
+  };
+}
+
+/** Sentencia que crea/actualiza una variante shiny. `pokemonRef` es un id numérico o un nombre de especie. */
+function variantStatement(pokemonRef, v) {
+  const name = text(v?.name), sprite = text(v?.sprite);
+  if (!name || !sprite) throw new Error('La variante necesita nombre y sprite');
+  const weight = Math.max(1, Math.round(Number(v.weight)) || 1);
+  const idSql = typeof pokemonRef === 'number' ? '?' : '(SELECT id FROM pokemon WHERE name = ?)';
+  return [`INSERT INTO shiny_variants (pokemon_id, name, sprite_url, weight) VALUES (${idSql}, ?, ?, ?)
+    ON CONFLICT(pokemon_id, name) DO UPDATE SET sprite_url = excluded.sprite_url, weight = excluded.weight`,
+  [pokemonRef, name, sprite, weight]];
+}
+
+/**
+ * Valida un Pokémon y devuelve las sentencias SQL que lo guardan (se ejecutan todas juntas en un solo viaje).
+ * merge=true (lotes): los campos ausentes conservan su valor previo (`prev` = fila actual o undefined).
+ */
+function pokemonStatements(input, merge, prev) {
+  const name = text(input.name);
+  if (!name) throw new Error('Falta el nombre');
+  if (!RARITIES[input.rarity]) throw new Error(`${name}: rareza inválida (${Object.keys(RARITIES).join(', ')})`);
+  const keep = (key, val) => (merge && val === undefined && prev ? prev[key] : val ?? null);
+
+  const stats = input.stats === undefined ? undefined : Object.fromEntries(
+    STAT_KEYS.filter((k) => Number.isFinite(Number(input.stats?.[k]))).map((k) => [k, Number(input.stats[k])]));
+  const abilities = input.abilities === undefined ? undefined : list(input.abilities);
+  const moves = input.moves === undefined ? undefined : list(input.moves);
+  const types = input.types === undefined ? undefined : list(input.types);
+
+  const odds = input.shiny_odds === undefined ? undefined : num(input.shiny_odds);
+  const canonW = input.shiny_canon_weight === undefined ? undefined : num(input.shiny_canon_weight);
+  if ((odds != null && !(odds >= 0)) || (canonW != null && !(canonW >= 0))) throw new Error(`${name}: valores de shiny inválidos`);
+
+  const json = (v) => (v === undefined ? undefined : JSON.stringify(v));
+  const stmts = [];
+  for (const n of abilities ?? []) stmts.push(['INSERT OR IGNORE INTO abilities (name) VALUES (?)', [n]]);
+  for (const n of moves ?? []) stmts.push(['INSERT OR IGNORE INTO moves (name) VALUES (?)', [n]]);
+  stmts.push([`
+    INSERT INTO pokemon (name, rarity, sprite_url, shiny_sprite_url, types, stats, abilities, moves, dex_text, shiny_odds, shiny_canon_weight)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(name) DO UPDATE SET rarity = excluded.rarity, sprite_url = excluded.sprite_url,
+      shiny_sprite_url = excluded.shiny_sprite_url, types = excluded.types, stats = excluded.stats,
+      abilities = excluded.abilities, moves = excluded.moves, dex_text = excluded.dex_text,
+      shiny_odds = excluded.shiny_odds, shiny_canon_weight = excluded.shiny_canon_weight`, [
+    name, input.rarity,
+    keep('sprite_url', input.sprite === undefined ? undefined : text(input.sprite)),
+    keep('shiny_sprite_url', input.shiny_sprite === undefined ? undefined : text(input.shiny_sprite)),
+    keep('types', json(types)),
+    keep('stats', json(stats)),
+    keep('abilities', json(abilities)),
+    keep('moves', json(moves)),
+    keep('dex_text', input.dex_text === undefined ? undefined : text(input.dex_text)),
+    keep('shiny_odds', odds),
+    keep('shiny_canon_weight', canonW) ?? 1,
+  ]]);
+  if (Array.isArray(input.shiny_variants)) input.shiny_variants.forEach((v) => stmts.push(variantStatement(name, v)));
+  return { name, stmts };
+}
+
+export function createApp() {
+  const password = process.env.DASHBOARD_PASSWORD;
+  const app = express();
+  app.disable('x-powered-by');
+  app.set('trust proxy', 1); // detrás del proxy del hosting (para IP real y cookie Secure)
+  app.use(express.json({ limit: '2mb' }));
+
+  app.get('/health', (req, res) => res.json({ ok: true })); // para que el hosting compruebe que está vivo
+
+  // ── Auth: clave única + cookie firmada. Sin estado en memoria, así sobrevive a reinicios/suspensión del hosting ──
+  const fails = new Map(); // ip -> { n, until }  (mejor esfuerzo)
+  const sha = (s) => crypto.createHash('sha256').update(s).digest();
+  const secret = sha(`rivals-dashboard:${password}`);
+  const sign = (exp) => crypto.createHmac('sha256', secret).update(String(exp)).digest('hex');
+  const makeToken = (ttlMs) => { const exp = Date.now() + ttlMs; return `${exp}.${sign(exp)}`; };
+  const cookieOf = (req) => /(?:^|;\s*)sid=([0-9]+\.[a-f0-9]+)/.exec(req.headers.cookie ?? '')?.[1];
+  const authed = (req) => {
+    const t = cookieOf(req);
+    if (!t) return false;
+    const [exp, sig] = t.split('.');
+    if (Number(exp) < Date.now()) return false;
+    const a = Buffer.from(sig), b = Buffer.from(sign(exp));
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  };
+
+  app.post('/api/login', (req, res) => {
+    const f = fails.get(req.ip) ?? { n: 0, until: 0 };
+    if (f.until > Date.now()) return res.status(429).json({ error: 'Demasiados intentos. Espera unos minutos.' });
+    const ok = crypto.timingSafeEqual(sha(String(req.body?.password ?? '')), sha(password));
+    if (!ok) {
+      f.n += 1;
+      if (f.n >= 5) { f.until = Date.now() + 10 * 60_000; f.n = 0; }
+      fails.set(req.ip, f);
+      return res.status(401).json({ error: 'Clave incorrecta' });
+    }
+    fails.delete(req.ip);
+    const week = 7 * 24 * 3600_000;
+    res.setHeader('Set-Cookie', `sid=${makeToken(week)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${week / 1000}${req.secure ? '; Secure' : ''}`);
+    return res.json({ ok: true });
+  });
+
+  app.use(express.static(PUBLIC));
+  app.use('/api', (req, res, next) => (authed(req) ? next() : res.status(401).json({ error: 'No autenticado' })));
+  app.get('/api/me', (req, res) => res.json({ ok: true }));
+
+  // Envuelve los handlers async para que un fallo de la BD llegue al manejador de errores
+  const h = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+  // ── Estructura del servidor (vía API de Discord) ──
+  app.get('/api/structure', h(async (req, res) => res.json(await structure())));
+
+  // ── Pokémon ──
+  app.get('/api/pokemon', h(async (req, res) => {
+    const [rows, variants] = await Promise.all([
+      all('SELECT * FROM pokemon ORDER BY name'),
+      all('SELECT id, pokemon_id, name, sprite_url AS sprite, weight FROM shiny_variants ORDER BY name'),
+    ]);
+    res.json(rows.map((r) => serializePokemon(r, variants)));
+  }));
+  app.post('/api/pokemon', h(async (req, res) => {
+    try {
+      const { name, stmts } = pokemonStatements(req.body ?? {}, false, undefined);
+      await batch(stmts);
+      res.json({ ok: true, name });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  }));
+  app.post('/api/pokemon/batch', h(async (req, res) => {
+    const items = Array.isArray(req.body) ? req.body : req.body?.pokemon;
+    if (!Array.isArray(items)) return res.status(400).json({ error: 'Se esperaba una lista JSON de Pokémon' });
+    const prevRows = await all('SELECT * FROM pokemon');
+    const prev = new Map(prevRows.map((r) => [r.name.toLowerCase(), r]));
+    let saved = 0; const errors = []; const stmts = [];
+    items.forEach((it, i) => {
+      try {
+        const r = pokemonStatements(it ?? {}, true, prev.get(String(it?.name ?? '').trim().toLowerCase()));
+        stmts.push(...r.stmts); saved += 1;
+      } catch (e) { errors.push(`#${i + 1}: ${e.message}`); }
+    });
+    // Todo el lote se guarda junto, en trozos para no saturar una sola petición
+    for (let i = 0; i < stmts.length; i += 200) await batch(stmts.slice(i, i + 200));
+    res.json({ ok: true, saved, errors });
+  }));
+  app.delete('/api/pokemon/:id', h(async (req, res) => {
+    const id = Number(req.params.id);
+    const used = await get(`SELECT (SELECT COUNT(*) FROM user_pokemon WHERE pokemon_id = ?)
+      + (SELECT COUNT(*) FROM active_spawns WHERE pokemon_id = ?) AS n`, [id, id]);
+    if (used.n > 0) return res.status(409).json({ error: 'No se puede borrar: tiene spawns o capturas de usuarios asociados.' });
+    await batch([
+      ['DELETE FROM spawn_entries WHERE pokemon_id = ?', [id]],
+      ['DELETE FROM shiny_variants WHERE pokemon_id = ?', [id]],
+      ['DELETE FROM pokemon WHERE id = ?', [id]],
+    ]);
+    return res.json({ ok: true });
+  }));
+
+  // ── Variantes shiny propias (solo shinys nuevos de Pokémon existentes; no hay Pokémon custom) ──
+  app.post('/api/pokemon/:id/variants', h(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!(await get('SELECT 1 AS ok FROM pokemon WHERE id = ?', [id]))) return res.status(404).json({ error: 'Pokémon inexistente' });
+    try {
+      const [sql, args] = variantStatement(id, req.body);
+      await run(sql, args);
+      res.json({ ok: true });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  }));
+  app.delete('/api/variants/:id', h(async (req, res) => {
+    const id = Number(req.params.id);
+    await batch([
+      ['UPDATE user_pokemon SET shiny_variant_id = NULL WHERE shiny_variant_id = ?', [id]],
+      ['DELETE FROM shiny_variants WHERE id = ?', [id]],
+    ]);
+    res.json({ ok: true });
+  }));
+
+  // ── Catálogo de movimientos / habilidades ──
+  const kinds = { moves: 'moves', abilities: 'abilities' };
+  app.get('/api/catalog/:kind', h(async (req, res) => {
+    const t = kinds[req.params.kind];
+    if (!t) return res.sendStatus(404);
+    return res.json(await all(`SELECT * FROM ${t} ORDER BY name`));
+  }));
+  app.post('/api/catalog/:kind', h(async (req, res) => {
+    const t = kinds[req.params.kind];
+    const name = text(req.body?.name);
+    if (!t || !name) return res.status(400).json({ error: 'Falta el nombre' });
+    await run(`INSERT INTO ${t} (name, type, description) VALUES (?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET type = excluded.type, description = excluded.description`,
+    [name, text(req.body.type), text(req.body.description)]);
+    return res.json({ ok: true });
+  }));
+  app.delete('/api/catalog/:kind/:name', h(async (req, res) => {
+    const t = kinds[req.params.kind];
+    if (!t) return res.sendStatus(404);
+    await run(`DELETE FROM ${t} WHERE name = ?`, [req.params.name]);
+    return res.json({ ok: true });
+  }));
+
+  // ── Spawn ──
+  app.get('/api/spawn/categories', h(async (req, res) => {
+    const [rows, active] = await Promise.all([
+      all('SELECT * FROM spawn_categories'),
+      all(`SELECT DISTINCT category_id FROM active_spawns WHERE status = 'active'`),
+    ]);
+    const busy = new Set(active.map((r) => r.category_id));
+    res.json(rows.map((r) => ({
+      category_id: r.category_id, enabled: !!r.enabled, next_spawn_at: r.next_spawn_at, active: busy.has(r.category_id),
+    })));
+  }));
+  app.post('/api/spawn/categories/:id', h(async (req, res) => {
+    const id = req.params.id;
+    if (req.body?.enabled) {
+      await run(`INSERT INTO spawn_categories (category_id, guild_id, enabled) VALUES (?, ?, 1)
+        ON CONFLICT(category_id) DO UPDATE SET enabled = 1`, [id, process.env.GUILD_ID]);
+      const busy = await get(`SELECT 1 AS ok FROM active_spawns WHERE category_id = ? AND forced = 0 AND status = 'active'`, [id]);
+      if (!busy) await scheduleNext(id);
+    } else {
+      await run('UPDATE spawn_categories SET enabled = 0, next_spawn_at = NULL WHERE category_id = ?', [id]);
+    }
+    res.json({ ok: true });
+  }));
+  app.get('/api/spawn/:categoryId/entries', h(async (req, res) => {
+    res.json(await all(`
+      SELECT e.id, e.channel_id, e.weight, p.name, p.rarity FROM spawn_entries e
+      JOIN pokemon p ON p.id = e.pokemon_id WHERE e.category_id = ? ORDER BY e.channel_id IS NOT NULL, p.name`,
+    [req.params.categoryId]));
+  }));
+  app.post('/api/spawn/:categoryId/entries', h(async (req, res) => {
+    const { pokemon_id: pokemonId, channel_id: channelId } = req.body ?? {};
+    const weight = Math.max(1, parseInt(req.body?.weight, 10) || 1);
+    if (!(await get('SELECT 1 AS ok FROM spawn_categories WHERE category_id = ?', [req.params.categoryId]))) {
+      return res.status(400).json({ error: 'Activa el spawn de la categoría primero.' });
+    }
+    if (!(await get('SELECT 1 AS ok FROM pokemon WHERE id = ?', [pokemonId]))) {
+      return res.status(400).json({ error: 'Pokémon inválido.' });
+    }
+    await run(`INSERT INTO spawn_entries (category_id, channel_id, pokemon_id, weight) VALUES (?, ?, ?, ?)
+      ON CONFLICT(category_id, IFNULL(channel_id, ''), pokemon_id) DO UPDATE SET weight = excluded.weight`,
+    [req.params.categoryId, channelId || null, pokemonId, weight]);
+    return res.json({ ok: true });
+  }));
+  app.delete('/api/spawn/entries/:id', h(async (req, res) => {
+    await run('DELETE FROM spawn_entries WHERE id = ?', [req.params.id]);
+    res.json({ ok: true });
+  }));
+
+  // ForceSpawn: anuncia el Pokémon por la API de Discord y lo registra; el bot (en Discloud) se encarga de que huya a su hora
+  app.post('/api/forcespawn', h(async (req, res) => {
+    const { pokemon_id: pokemonId, channel_id: channelId } = req.body ?? {};
+    const channel = await textChannel(String(channelId));
+    if (!channel) return res.status(400).json({ error: 'Canal inválido.' });
+    const p = await get('SELECT * FROM pokemon WHERE id = ?', [pokemonId]);
+    if (!p) return res.status(400).json({ error: 'Pokémon inválido.' });
+    if (await activeSpawnIn(channel.id)) return res.status(409).json({ error: 'Ya hay un Pokémon activo en ese canal.' });
+    const { embed, despawnAt } = spawnPayload(p);
+    let msg;
+    try { msg = await sendEmbed(channel.id, embed); } catch {
+      return res.status(500).json({ error: 'No pude enviar el mensaje (¿permisos del bot?).' });
+    }
+    await registerSpawn({
+      categoryId: channel.parent_id ?? '', channelId: channel.id, messageId: msg.id,
+      pokemonId: p.id, forced: true, despawnAt,
+    });
+    return res.json({ ok: true });
+  }));
+
+  // ── Ajustes / viaje ──
+  app.get('/api/settings', h(async (req, res) => {
+    const [rows, zones] = await Promise.all([all('SELECT key, value FROM settings'), all('SELECT * FROM zone_travel')]);
+    const s = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    res.json({
+      travel_hours: Number(s.travel_hours), travel_cost: Number(s.travel_cost),
+      move_cost: Number(s.move_cost), trade_cost: Number(s.trade_cost), shiny_odds: Number(s.shiny_odds ?? 4096),
+      zones,
+    });
+  }));
+  app.post('/api/settings', h(async (req, res) => {
+    const b = req.body ?? {};
+    const hours = Number(b.travel_hours), cost = Number(b.travel_cost);
+    const moveCost = Number(b.move_cost), tradeCost = Number(b.trade_cost);
+    const shinyOdds = b.shiny_odds === undefined ? null : Number(b.shiny_odds);
+    if (!(hours > 0) || !(cost >= 0) || !(moveCost >= 0) || !(tradeCost >= 0) || (shinyOdds != null && !(shinyOdds >= 0))) {
+      return res.status(400).json({ error: 'Valores inválidos.' });
+    }
+    const up = 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value';
+    const stmts = [
+      [up, ['travel_hours', String(hours)]], [up, ['travel_cost', String(Math.round(cost))]],
+      [up, ['move_cost', String(Math.round(moveCost))]], [up, ['trade_cost', String(Math.round(tradeCost))]],
+    ];
+    if (shinyOdds != null) stmts.push([up, ['shiny_odds', String(Math.round(shinyOdds))]]);
+    await batch(stmts);
+    return res.json({ ok: true });
+  }));
+  app.post('/api/settings/zone/:id', h(async (req, res) => {
+    const hrs = req.body?.hours === '' || req.body?.hours == null ? null : Number(req.body.hours);
+    const cst = req.body?.cost === '' || req.body?.cost == null ? null : Math.round(Number(req.body.cost));
+    const isZone = req.body?.is_zone ? 1 : 0;
+    if ((hrs != null && !(hrs > 0)) || (cst != null && !(cst >= 0))) return res.status(400).json({ error: 'Valores inválidos.' });
+    if (hrs == null && cst == null && !isZone) await run('DELETE FROM zone_travel WHERE category_id = ?', [req.params.id]);
+    else {
+      await run(`INSERT INTO zone_travel (category_id, hours, cost, is_zone) VALUES (?, ?, ?, ?)
+        ON CONFLICT(category_id) DO UPDATE SET hours = excluded.hours, cost = excluded.cost, is_zone = excluded.is_zone`,
+      [req.params.id, hrs, cst, isZone]);
+    }
+    return res.json({ ok: true });
+  }));
+
+  app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+    console.error('dashboard:', err);
+    res.status(500).json({ error: 'Error interno' });
+  });
+
+  return app;
+}
