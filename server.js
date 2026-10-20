@@ -12,6 +12,24 @@ import { structure, textChannel, textChannelGroups, sendEmbed } from './discord.
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 const STAT_KEYS = ['hp', 'atk', 'def', 'spa', 'spd', 'spe'];
 const EVO_TYPES = ['exp', 'amistad', 'item'];
+const IMG_MAX = 1_000_000; // 1 MB por imagen
+
+/** Crea la tabla donde se guardan las imágenes subidas (solo la usa el dashboard). Se llama al arrancar. */
+export const initImages = () => run(`CREATE TABLE IF NOT EXISTS images (
+  id TEXT PRIMARY KEY, mime TEXT NOT NULL, data BLOB NOT NULL, created_at INTEGER NOT NULL)`);
+
+/** Detecta el formato por los primeros bytes (no se fía del tipo que declare el navegador). SVG queda fuera a propósito. */
+function sniffImage(b) {
+  const at = (i, str) => b.subarray(i, i + str.length).toString('latin1') === str;
+  if (b.length > 12) {
+    if (b[0] === 0x89 && at(1, 'PNG')) return 'image/png';
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+    if (at(0, 'GIF87a') || at(0, 'GIF89a')) return 'image/gif';
+    if (at(0, 'RIFF') && at(8, 'WEBP')) return 'image/webp';
+  }
+  return null;
+}
+const LOCAL = /^(localhost|127\.|0\.0\.0\.0|\[::1\])/i;
 
 const list = (v) => (Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : [])
   .map((s) => String(s).trim()).filter(Boolean);
@@ -34,7 +52,7 @@ function serializePokemon(r, variants, byId) {
 /** Sentencia que crea/actualiza una variante shiny. `pokemonRef` es un id numérico o un nombre de especie. */
 function variantStatement(pokemonRef, v) {
   const name = text(v?.name), sprite = text(v?.sprite);
-  if (!name || !sprite) throw new Error('La variante necesita nombre y sprite');
+  if (!name || !sprite) throw new Error('La variante necesita nombre e imagen');
   const weight = Math.max(1, Math.round(Number(v.weight)) || 1);
   const idSql = typeof pokemonRef === 'number' ? '?' : '(SELECT id FROM pokemon WHERE name = ?)';
   return [`INSERT INTO shiny_variants (pokemon_id, name, sprite_url, weight) VALUES (${idSql}, ?, ?, ?)
@@ -161,6 +179,27 @@ export function createApp() {
 
   // Envuelve los handlers async para que un fallo de la BD llegue al manejador de errores
   const h = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+  // ── Imágenes: se suben desde el panel y se sirven públicamente (Discord necesita una URL para mostrarlas) ──
+  // El id es el hash del contenido: la misma imagen no se guarda dos veces y la URL nunca cambia de contenido.
+  app.get('/img/:id', h(async (req, res) => {
+    const row = /^[a-f0-9]{32}$/.test(req.params.id) ? await get('SELECT mime, data FROM images WHERE id = ?', [req.params.id]) : null;
+    if (!row) return res.sendStatus(404);
+    res.set({ 'Content-Type': row.mime, 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' });
+    return res.send(Buffer.from(row.data));
+  }));
+  app.post('/api/upload', express.raw({ type: () => true, limit: IMG_MAX }), h(async (req, res) => {
+    const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const mime = sniffImage(buf);
+    if (!mime) return res.status(400).json({ error: 'Formato no válido. Sube un PNG, JPG, GIF o WebP.' });
+    const base = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+    if (!process.env.PUBLIC_URL && LOCAL.test(req.get('host') ?? '')) {
+      return res.status(400).json({ error: 'Estás en una dirección local: Discord no podría ver la imagen. Define PUBLIC_URL (la dirección pública del dashboard).' });
+    }
+    const id = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 32);
+    await run('INSERT OR IGNORE INTO images (id, mime, data, created_at) VALUES (?, ?, ?, ?)', [id, mime, buf, Date.now()]);
+    return res.json({ ok: true, url: `${base}/img/${id}` });
+  }));
 
   // ── Estructura del servidor (vía API de Discord) ──
   app.get('/api/structure', h(async (req, res) => res.json(await structure())));
@@ -413,6 +452,7 @@ export function createApp() {
   }));
 
   app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+    if (err.type === 'entity.too.large') return res.status(413).json({ error: 'La imagen pesa más de 1 MB. Redúcela y vuelve a subirla.' });
     console.error('dashboard:', err);
     res.status(500).json({ error: 'Error interno' });
   });

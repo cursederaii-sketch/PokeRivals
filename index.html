@@ -40,6 +40,11 @@ dialog::backdrop{background:rgba(18,50,74,.35)}
 #toast.show{opacity:1}
 #login{max-width:320px;margin:18vh auto}
 .hide{display:none!important}
+.imgf{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.imgf .thumb{width:48px;height:48px;border:1px dashed var(--bd);border-radius:8px;display:grid;place-items:center;background:#fff;overflow:hidden}
+.imgf .thumb img{max-width:100%;max-height:100%;object-fit:contain;image-rendering:pixelated}
+label.upl{display:inline-block;margin:0;background:#fff;color:var(--ink);border:1px solid var(--bd);border-radius:8px;padding:6px 11px;font-size:14px;cursor:pointer}
+label.upl.busy{opacity:.5;pointer-events:none}
 </style>
 </head>
 <body>
@@ -84,7 +89,7 @@ dialog::backdrop{background:rgba(18,50,74,.35)}
         <div class="row" style="margin-bottom:8px">
           <input class="grow" id="in-name" placeholder="Nombre (ej. Piedra Trueno)">
           <input class="grow" id="in-desc" placeholder="Descripción">
-          <input class="grow" id="in-icon" placeholder="Icono (URL, opcional)">
+          <div class="imgf" id="in-icon" data-url=""></div>
           <button class="b" id="in-save">Guardar</button>
         </div>
         <div id="itemList"></div>
@@ -140,8 +145,8 @@ dialog::backdrop{background:rgba(18,50,74,.35)}
   <label>Nombre</label><input id="f-name">
   <label>Rareza</label>
   <select id="f-rarity"><option value="comun">Común</option><option value="raro">Raro</option><option value="epico">Épico</option><option value="legendario">Legendario</option></select>
-  <label>Sprite (URL)</label><input id="f-sprite">
-  <label>Sprite shiny canon (URL)</label><input id="f-shiny">
+  <label>Sprite</label><div class="imgf" id="f-sprite" data-url=""></div>
+  <label>Sprite shiny canon</label><div class="imgf" id="f-shiny" data-url=""></div>
   <label>Peso del shiny canon (1 = normal · 0 = excluirlo y usar solo variantes propias)</label><input id="f-canonw" type="number" min="0">
   <label>Probabilidad shiny de esta especie (1 en N · vacío = ajuste global · 0 = nunca)</label><input id="f-odds" type="number" min="0">
   <label>Variantes shiny propias (peso = frecuencia relativa entre todas las shiny)</label>
@@ -170,7 +175,7 @@ dialog::backdrop{background:rgba(18,50,74,.35)}
 
 <dialog id="batchDlg">
   <h2>Importar lote (JSON)</h2>
-  <p class="sub">Lista de Pokémon. Solo <b>name</b> y <b>rarity</b> son obligatorios; los campos ausentes conservan lo que ya había. Los movimientos y habilidades nuevos se crean solos en el catálogo para completarlos después. Opcionales para shinys: <b>shiny_odds</b> (1 en N), <b>shiny_canon_weight</b> y <b>shiny_variants</b> (lista de {name, sprite, weight}). Evolución: <b>evolution</b> = {"to":"Raichu", "type":"exp|amistad|item", "qty":2, "item":"Piedra Trueno"} (o <b>null</b> para quitarla; <b>to</b> acepta nombre o id).</p>
+  <p class="sub">Lista de Pokémon. Solo <b>name</b> y <b>rarity</b> son obligatorios; los campos ausentes conservan lo que ya había. Los movimientos y habilidades nuevos se crean solos en el catálogo para completarlos después. Opcionales para shinys: <b>shiny_odds</b> (1 en N), <b>shiny_canon_weight</b> y <b>shiny_variants</b> (lista de {name, sprite, weight}). Las imágenes se suben desde el editor; en el JSON, <b>sprite</b> y <b>shiny_sprite</b> solo aceptan una URL ya existente. Evolución: <b>evolution</b> = {"to":"Raichu", "type":"exp|amistad|item", "qty":2, "item":"Piedra Trueno"} (o <b>null</b> para quitarla; <b>to</b> acepta nombre o id).</p>
   <textarea id="batchTxt" style="min-height:220px;font-family:ui-monospace,monospace;font-size:12px" placeholder='[
   {"name":"Pikachu","rarity":"raro","sprite":"https://…","types":["Eléctrico"],
    "stats":{"hp":35,"atk":55,"def":40,"spa":50,"spd":50,"spe":90},
@@ -198,6 +203,30 @@ async function api(method, url, body) {
   return data;
 }
 const act = (fn) => async (...a) => { try { await fn(...a); } catch (e) { /* ya mostrado */ } };
+
+/* ---- campos de imagen: se sube el archivo y el campo guarda la URL resultante ---- */
+const imgInner = (url) => `<div class="thumb">${url ? `<img src="${esc(url)}" alt="">` : '<span class="sub">—</span>'}</div>
+  <label class="upl">${url ? 'Cambiar imagen' : 'Subir imagen'}<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden></label>
+  ${url ? '<button type="button" class="g d" data-clear>Quitar</button>' : ''}`;
+const setImg = (id, url) => { const el = $(id); el.dataset.url = url || ''; el.innerHTML = imgInner(url || ''); };
+const getImg = (id) => $(id).dataset.url || '';
+const imgFieldHtml = (id) => `<div class="imgf" id="${id}" data-url="">${imgInner('')}</div>`;
+async function uploadImage(file) {
+  if (file.size > 1_000_000) throw new Error('La imagen pesa más de 1 MB. Redúcela y vuelve a subirla.');
+  const r = await fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401) { showLogin(); throw new Error('Sesión expirada'); }
+  if (!r.ok) throw new Error(data.error || 'No se pudo subir la imagen');
+  return data.url;
+}
+document.addEventListener('change', async (e) => {
+  const input = e.target, box = input.closest?.('.imgf');
+  if (input.type !== 'file' || !box || !input.files[0]) return;
+  const label = input.parentElement; label.classList.add('busy');
+  try { setImg(box.id, await uploadImage(input.files[0])); toast('Imagen subida'); }
+  catch (err) { toast(err.message); input.value = ''; label.classList.remove('busy'); }
+});
+document.addEventListener('click', (e) => { if (e.target.matches?.('.imgf [data-clear]')) setImg(e.target.closest('.imgf').id, ''); });
 
 /* ---- login / tabs ---- */
 function showLogin() { $('app').classList.add('hide'); $('login').classList.remove('hide'); }
@@ -248,12 +277,12 @@ function renderVars(p) {
   $('varBox').innerHTML = (canonW > 0 ? `<div class="item">${img(p.shiny_sprite)}<div class="grow"><b>Canon</b> <span class="tag">${pct(canonW)}</span></div></div>` : '')
     + p.variants.map((v) => `<div class="item">${img(v.sprite)}<div class="grow"><b>${esc(v.name)}</b> <span class="tag">peso ${v.weight} · ${pct(v.weight)}</span></div>
         <button class="g d" data-vdel="${v.id}">✕</button></div>`).join('')
-    + `<div class="row" style="margin-top:8px"><input id="vn" class="grow" placeholder="Nombre de la variante"><input id="vs" class="grow" placeholder="Sprite (URL)">
+    + `<div class="row" style="margin-top:8px"><input id="vn" class="grow" placeholder="Nombre de la variante">${imgFieldHtml('vs')}
         <input id="vw" type="number" min="1" value="1" style="width:70px" title="Peso"><button class="g" id="vAdd">Añadir</button></div>`;
 }
 $('varBox').onclick = act(async (e) => {
   if (e.target.id === 'vAdd') {
-    await api('POST', `/api/pokemon/${curPk}/variants`, { name: $('vn').value, sprite: $('vs').value, weight: $('vw').value });
+    await api('POST', `/api/pokemon/${curPk}/variants`, { name: $('vn').value, sprite: getImg('vs'), weight: $('vw').value });
     toast('Variante guardada');
   } else if (e.target.dataset.vdel) {
     if (!confirm('¿Borrar esta variante? Los Pokémon que ya la tienen pasarán a mostrar el shiny canon.')) return;
@@ -266,7 +295,7 @@ function openPk(p) {
   p = p || { stats: {}, types: [], abilities: [], moves: [], variants: [] };
   $('pkDlgTitle').textContent = p.id ? 'Editar Pokémon' : 'Nuevo Pokémon';
   $('f-name').value = p.name || ''; $('f-name').disabled = !!p.id;
-  $('f-rarity').value = p.rarity || 'comun'; $('f-sprite').value = p.sprite || ''; $('f-shiny').value = p.shiny_sprite || '';
+  $('f-rarity').value = p.rarity || 'comun'; setImg('f-sprite', p.sprite); setImg('f-shiny', p.shiny_sprite);
   $('f-types').value = p.types.join(', '); $('f-abilities').value = p.abilities.join(', ');
   $('f-moves').value = p.moves.join(', '); $('f-dex').value = p.dex_text || '';
   $('f-canonw').value = p.shiny_canon_weight ?? 1; $('f-odds').value = p.shiny_odds ?? ''; renderVars(p);
@@ -303,7 +332,7 @@ $('pkCancel').onclick = () => $('pkDlg').close();
 $('pkSave').onclick = act(async () => {
   const stats = {}; S.forEach((k) => { if ($('s-' + k).value !== '') stats[k] = Number($('s-' + k).value); });
   await api('POST', '/api/pokemon', {
-    name: $('f-name').value, rarity: $('f-rarity').value, sprite: $('f-sprite').value, shiny_sprite: $('f-shiny').value,
+    name: $('f-name').value, rarity: $('f-rarity').value, sprite: getImg('f-sprite'), shiny_sprite: getImg('f-shiny'),
     types: $('f-types').value, stats, abilities: $('f-abilities').value, moves: $('f-moves').value, dex_text: $('f-dex').value,
     shiny_odds: $('f-odds').value, shiny_canon_weight: $('f-canonw').value,
     evolution: $('f-evo').value ? { to: Number($('f-evo').value), type: $('f-evotype').value, qty: $('f-evoqty').value, item: $('f-evoitem').value } : null,
@@ -356,12 +385,12 @@ async function loadItems() {
       <button class="g d" data-rm="${esc(r.name)}">✕</button></div>`).join('') || '<span class="sub">Aún no hay objetos.</span>';
 }
 $('in-save').onclick = act(async () => {
-  await api('POST', '/api/items', { name: $('in-name').value, description: $('in-desc').value, icon: $('in-icon').value });
-  ['in-name', 'in-desc', 'in-icon'].forEach((id) => { $(id).value = ''; }); toast('Guardado'); loadItems();
+  await api('POST', '/api/items', { name: $('in-name').value, description: $('in-desc').value, icon: getImg('in-icon') });
+  ['in-name', 'in-desc'].forEach((id) => { $(id).value = ''; }); setImg('in-icon', ''); toast('Guardado'); loadItems();
 });
 $('itemList').onclick = act(async (e) => {
   const d = e.target.dataset;
-  if (d.fill) { $('in-name').value = d.fill; $('in-desc').value = d.d; $('in-icon').value = d.i; $('in-name').focus(); }
+  if (d.fill) { $('in-name').value = d.fill; $('in-desc').value = d.d; setImg('in-icon', d.i); $('in-name').focus(); }
   if (d.rm && confirm(`¿Borrar ${d.rm}? Los entrenadores que ya lo tengan lo conservan, pero sin descripción.`)) {
     await api('DELETE', '/api/items/' + encodeURIComponent(d.rm)); loadItems();
   }
@@ -434,6 +463,7 @@ $('centers').onclick = act(async (e) => { const id = e.target.dataset.ctrRm; if 
 $('sSave').onclick = act(async () => { await api('POST', '/api/settings', { travel_hours: $('sHours').value, travel_cost: $('sCost').value, move_cost: $('sMove').value, trade_cost: $('sTrade').value, shiny_odds: $('sShiny').value }); toast('Guardado'); });
 $('zones').onclick = act(async (e) => { const id = e.target.dataset.z; if (id) { await api('POST', '/api/settings/zone/' + id, { hours: $('zh-' + id).value, cost: $('zc-' + id).value, is_zone: $('zz-' + id).checked }); toast('Guardado'); } });
 
+setImg('in-icon', ''); setImg('f-sprite', ''); setImg('f-shiny', '');
 boot();
 </script>
 </body>

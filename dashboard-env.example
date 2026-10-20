@@ -1,0 +1,14 @@
+# Base de datos online (la MISMA que usa el bot)
+TURSO_DATABASE_URL=
+TURSO_AUTH_TOKEN=
+# Mismo token y servidor que el bot (el dashboard usa la API de Discord con él)
+DISCORD_TOKEN=
+GUILD_ID=
+# Clave para entrar al panel (elige una larga)
+DASHBOARD_PASSWORD=
+# Dirección pública del dashboard (ej. https://mi-dashboard.onrender.com). Las imágenes subidas se publican en ella,
+# porque Discord necesita una URL para mostrarlas. Obligatoria si accedes por localhost.
+PUBLIC_URL=
+# Solo en local. En un hosting web el puerto lo pone la variable PORT
+DASHBOARD_PORT=3000
+DASHBOARD_HOST=127.0.0.1
